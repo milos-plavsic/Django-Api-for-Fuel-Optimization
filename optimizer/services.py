@@ -1,33 +1,43 @@
 import requests
 import math
+import numpy as np
+from scipy.spatial import KDTree
 from django.conf import settings
+from django.core.cache import cache
 from .models import FuelStop
 
 class FuelOptimizationService:
     OSRM_BASE_URL = "http://router.project-osrm.org/route/v1/driving/"
 
     @staticmethod
-    def get_route(start_loc, end_loc):
-        """
-        Calls OSRM API to get the route between start_loc and end_loc.
-        Expects locations as "City, State".
-        """
-        # First, geocode the city/state names to lat/lon if needed.
-        # For simplicity in this implementation, we assume start_loc and end_loc 
-        # can be geocoded or we use a geocoding service.
-        # Let's use Nominatim for geocoding.
-        
-        def geocode(location):
-            url = f"https://nominatim.openstreetmap.org/search?q={location}&format=json&limit=1"
-            headers = {'User-Agent': 'FuelOptimizationAPI/1.0'}
+    def geocode(location):
+        cache_key = f"geocode_{location.replace(' ', '_')}"
+        cached = cache.get(cache_key)
+        if cached:
+            return cached
+
+        url = f"https://nominatim.openstreetmap.org/search?q={location}&format=json&limit=1"
+        headers = {'User-Agent': 'FuelOptimizationAPI/1.0'}
+        try:
             response = requests.get(url, headers=headers)
             if response.status_code == 200 and response.json():
                 data = response.json()[0]
-                return float(data['lon']), float(data['lat'])
-            return None
+                coords = (float(data['lon']), float(data['lat']))
+                cache.set(cache_key, coords, 86400) # 24h
+                return coords
+        except Exception:
+            pass
+        return None
 
-        start_coords = geocode(start_loc)
-        end_coords = geocode(end_loc)
+    @staticmethod
+    def get_route(start_loc, end_loc):
+        cache_key = f"route_{start_loc.replace(' ', '_')}_{end_loc.replace(' ', '_')}"
+        cached = cache.get(cache_key)
+        if cached:
+            return cached
+
+        start_coords = FuelOptimizationService.geocode(start_loc)
+        end_coords = FuelOptimizationService.geocode(end_loc)
 
         if not start_coords or not end_coords:
             raise ValueError("Could not geocode one or both locations.")
@@ -41,54 +51,78 @@ class FuelOptimizationService:
                 geometry = route['geometry']
                 distance_meters = route['distance']
                 distance_miles = distance_meters * 0.000621371
-                return geometry, distance_miles
+                result = (geometry, distance_miles)
+                cache.set(cache_key, result, 3600) # 1h
+                return result
         
         raise Exception("Failed to fetch route from OSRM.")
 
     @staticmethod
+    def ramer_douglas_peucker(points, epsilon):
+        """Simplifies a path using RDP algorithm."""
+        if len(points) < 3:
+            return points
+
+        def d2(p, a, b):
+            # distance squared from point p to line segment ab
+            ax, ay = a
+            bx, by = b
+            px, py = p
+            dx, dy = bx - ax, by - ay
+            if dx == 0 and dy == 0:
+                return (px - ax)**2 + (py - ay)**2
+            t = ((px - ax) * dx + (py - ay) * dy) / (dx**2 + dy**2)
+            t = max(0, min(1, t))
+            return (px - (ax + t * dx))**2 + (py - (ay + t * dy))**2
+
+        dmax = 0
+        index = 0
+        for i in range(1, len(points) - 1):
+            d = d2(points[i], points[0], points[-1])
+            if d > dmax:
+                index = i
+                dmax = d
+
+        if dmax > epsilon**2:
+            res1 = FuelOptimizationService.ramer_douglas_peucker(points[:index+1], epsilon)
+            res2 = FuelOptimizationService.ramer_douglas_peucker(points[index:], epsilon)
+            return res1[:-1] + res2
+        else:
+            return [points[0], points[-1]]
+
+    @staticmethod
     def find_stops_along_route(route_coords):
-        """
-        Finds FuelStop objects within ~5km of any point on the route.
-        route_coords is a list of [lon, lat] pairs.
-        """
-        # To avoid excessive DB queries, we can use a bounding box approach first
-        # then refine with distance calculation if necessary.
-        # For a more "state-of-the-art" approach, we'd use PostGIS, 
-        # but with SQLite we'll do a simple approximation.
+        """Uses KD-Tree for efficient spatial search along the route."""
+        # 1. Simplify route for spatial query efficiency
+        # epsilon ~ 0.01 deg is roughly 1km
+        simplified_route = FuelOptimizationService.ramer_douglas_peucker(route_coords, 0.01)
         
-        lons = [c[0] for c in route_coords]
-        lats = [c[1] for c in route_coords]
+        # 2. Get all stops from DB (caching KD-Tree would be better if data is static)
+        stops_cache_key = "all_fuel_stops_kdtree"
+        cached_data = cache.get(stops_cache_key)
         
-        min_lon, max_lon = min(lons), max(lons)
-        min_lat, max_lat = min(lats), max(lats)
+        if cached_data:
+            tree, stops_list = cached_data
+        else:
+            stops_qs = FuelStop.objects.all().only('id', 'name', 'address', 'city', 'state', 'retail_price', 'latitude', 'longitude')
+            stops_list = list(stops_qs)
+            if not stops_list:
+                return []
+            coords = np.array([[s.longitude, s.latitude] for s in stops_list])
+            tree = KDTree(coords)
+            cache.set(stops_cache_key, (tree, stops_list), 3600)
+
+        # 3. Find stops within ~3 miles (0.045 degrees approx) of any simplified route point
+        relevant_indices = set()
+        for pt in simplified_route:
+            indices = tree.query_ball_point(pt, 0.045)
+            relevant_indices.update(indices)
         
-        # Add a small buffer (~5km is roughly 0.045 degrees)
-        buffer = 0.045
-        relevant_stops = FuelStop.objects.filter(
-            longitude__range=(min_lon - buffer, max_lon + buffer),
-            latitude__range=(min_lat - buffer, max_lat + buffer)
-        )
-        
-        stops_along_route = []
-        for stop in relevant_stops:
-            # Check if stop is near any point on the route
-            # For efficiency, we can sample the route points or use a more robust path-distance algorithm
-            is_near = False
-            for i in range(0, len(route_coords), max(1, len(route_coords) // 100)):
-                point = route_coords[i]
-                dist = FuelOptimizationService.haversine(stop.longitude, stop.latitude, point[0], point[1])
-                if dist <= 5.0: # 5km
-                    is_near = True
-                    break
-            if is_near:
-                stops_along_route.append(stop)
-                
-        return stops_along_route
+        return [stops_list[i] for i in relevant_indices]
 
     @staticmethod
     def haversine(lon1, lat1, lon2, lat2):
-        # Calculate distance in km
-        R = 6371
+        R = 3958.8 # miles
         dlat = math.radians(lat2 - lat1)
         dlon = math.radians(lon2 - lon1)
         a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
@@ -98,81 +132,91 @@ class FuelOptimizationService:
     @staticmethod
     def optimize_fuel_plan(route_coords, total_distance):
         """
-        Optimizes fuel stops along the route.
-        Start with full tank (500 miles). MPG = 10.
-        Logic: Every 400-450 miles, identify reachable stops within next 50-100 miles.
-        Select the CHEAPEST one.
+        Implements Dynamic Programming to find the Global Minimum cost.
+        Nodes: Start (0), End (N+1), and FuelStops along the route.
+        Edges: A -> B is valid if dist(A, B) <= 500 miles.
+        Cost(A, B) = (dist(A, B) / 10 MPG) * Price(B).
         """
         mpg = 10
         tank_capacity = 500
-        current_fuel_range = tank_capacity
-        total_cost = 0.0
-        stops_to_make = []
         
         all_stops = FuelOptimizationService.find_stops_along_route(route_coords)
-        if not all_stops:
-            return [], 0.0
-
-        # Map stops to their approximate distance along the route
-        # This is a simplified approach
+        
+        # Project stops onto route to get distances
+        # For Dijkstra/DP, we need stops ordered by distance from start
         stops_with_dist = []
         for stop in all_stops:
-            # Find closest point on route to get approx distance
+            # Find closest point on route
+            # Using simple distance to closest route point
             min_dist = float('inf')
             closest_idx = 0
             for i, pt in enumerate(route_coords):
-                d = FuelOptimizationService.haversine(stop.longitude, stop.latitude, pt[0], pt[1])
+                d = (stop.longitude - pt[0])**2 + (stop.latitude - pt[1])**2
                 if d < min_dist:
                     min_dist = d
                     closest_idx = i
             
-            # Distance along route in miles
-            dist_along_route = (closest_idx / len(route_coords)) * total_distance
-            stops_with_dist.append((stop, dist_along_route))
+            dist_along_route = (closest_idx / (len(route_coords)-1)) * total_distance
+            # Calculate detour cost: Stop is some distance off route
+            detour_dist = FuelOptimizationService.haversine(stop.longitude, stop.latitude, route_coords[closest_idx][0], route_coords[closest_idx][1])
             
-        stops_with_dist.sort(key=lambda x: x[1])
+            stops_with_dist.append({
+                'obj': stop,
+                'dist': dist_along_route,
+                'detour': detour_dist
+            })
         
-        current_pos = 0
-        while current_pos + current_fuel_range < total_distance:
-            # Need to refuel
-            # Search for stops between (current_pos + 400) and (current_pos + 500)
-            window_start = current_pos + 400
-            window_end = current_pos + 500
-            
-            reachable_stops = [s for s in stops_with_dist if window_start <= s[1] <= window_end]
-            
-            if not reachable_stops:
-                # If no stops in preferred window, take the cheapest reachable stop before running out
-                reachable_stops = [s for s in stops_with_dist if current_pos < s[1] <= window_end]
-            
-            if not reachable_stops:
-                # Still no stops? This route might be impossible with these constraints
-                # or our stop data is sparse. Take the last available stop if any.
-                break
+        stops_with_dist.sort(key=lambda x: x['dist'])
+
+        # Nodes: 0 is start, 1..N are stops, N+1 is destination
+        nodes = [{'dist': 0, 'price': 0, 'detour': 0}] + stops_with_dist + [{'dist': total_distance, 'price': 0, 'detour': 0}]
+        n = len(nodes)
+        
+        # DP: min_cost[i] = minimum cost to reach node i with full tank
+        # Actually, simpler to think: min_cost[i] is min cost to reach i and refuel there.
+        # But we start with full tank, so cost to reach 0 is 0.
+        
+        inf = float('inf')
+        min_cost = [inf] * n
+        parent = [-1] * n
+        min_cost[0] = 0
+        
+        for i in range(1, n):
+            for j in range(i):
+                # Distance from node j to node i
+                # If we are at node j (refueled), can we reach node i?
+                # Distance includes detour to j and detour to i if they are stops
+                d = nodes[i]['dist'] - nodes[j]['dist']
                 
-            # Select cheapest
-            cheapest_stop_data = min(reachable_stops, key=lambda x: x[0].retail_price)
-            stop_obj = cheapest_stop_data[0]
-            stop_dist = cheapest_stop_data[1]
-            
-            # Calculate fuel needed to fill up (assuming we fill up to 500 miles range)
-            # For simplicity, let's say we fill the whole tank
-            # Cost = tank_capacity / mpg * price (simplified)
-            # Actual cost would depend on how much we consumed.
-            fuel_consumed = (stop_dist - current_pos) / mpg
-            cost = float(fuel_consumed) * float(stop_obj.retail_price)
-            
+                # If d > 500, we can't reach i from j directly
+                if d > tank_capacity:
+                    continue
+                
+                # Cost to go from j to i and refuel at i
+                # Fuel consumed = d / 10
+                fuel_consumed = d / mpg
+                price = float(nodes[i]['obj'].retail_price) if i < n-1 else 0
+                trip_cost = fuel_consumed * price
+                
+                if min_cost[j] + trip_cost < min_cost[i]:
+                    min_cost[i] = min_cost[j] + trip_cost
+                    parent[i] = j
+
+        # Path reconstruction
+        stops_to_make = []
+        curr = parent[n-1] # Last stop before destination
+        while curr > 0:
+            node = nodes[curr]
+            stop_obj = node['obj']
             stops_to_make.append({
                 "name": stop_obj.name,
                 "address": stop_obj.address,
                 "city": stop_obj.city,
                 "state": stop_obj.state,
                 "price": float(stop_obj.retail_price),
-                "distance_along_route": stop_dist
+                "distance_along_route": node['dist']
             })
-            total_cost += cost
-            
-            current_pos = stop_dist
-            current_fuel_range = tank_capacity
-            
-        return stops_to_make, total_cost
+            curr = parent[curr]
+        
+        stops_to_make.reverse()
+        return stops_to_make, min_cost[n-1], "Global DP"
