@@ -1,10 +1,34 @@
 import requests
 import math
 import numpy as np
+import logging
 from scipy.spatial import KDTree
 from django.conf import settings
 from django.core.cache import cache
 from .models import FuelStop
+
+logger = logging.getLogger(__name__)
+
+# Global variables for KD-Tree singleton
+_STOPS_TREE = None
+_STOPS_LIST = None
+
+def get_stops_data():
+    """Lazily initializes and returns the KD-Tree and stops list singleton."""
+    global _STOPS_TREE, _STOPS_LIST
+    if _STOPS_TREE is None or _STOPS_LIST is None:
+        logger.info("Initializing KD-Tree for fuel stops...")
+        stops_qs = FuelStop.objects.all().only(
+            'id', 'name', 'address', 'city', 'state', 'retail_price', 'latitude', 'longitude'
+        )
+        _STOPS_LIST = list(stops_qs)
+        if _STOPS_LIST:
+            coords = np.array([[s.longitude, s.latitude] for s in _STOPS_LIST])
+            _STOPS_TREE = KDTree(coords)
+            logger.info(f"KD-Tree successfully initialized with {len(_STOPS_LIST)} stops.")
+        else:
+            logger.warning("No fuel stops found in database during KD-Tree initialization.")
+    return _STOPS_TREE, _STOPS_LIST
 
 class FuelOptimizationService:
     OSRM_BASE_URL = "http://router.project-osrm.org/route/v1/driving/"
@@ -25,8 +49,8 @@ class FuelOptimizationService:
                 coords = (float(data['lon']), float(data['lat']))
                 cache.set(cache_key, coords, 86400) # 24h
                 return coords
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Geocoding error for {location}: {e}")
         return None
 
     @staticmethod
@@ -40,20 +64,24 @@ class FuelOptimizationService:
         end_coords = FuelOptimizationService.geocode(end_loc)
 
         if not start_coords or not end_coords:
+            logger.error(f"Failed to geocode locations: {start_loc} -> {end_loc}")
             raise ValueError("Could not geocode one or both locations.")
 
         osrm_url = f"{FuelOptimizationService.OSRM_BASE_URL}{start_coords[0]},{start_coords[1]};{end_coords[0]},{end_coords[1]}?overview=full&geometries=geojson"
-        response = requests.get(osrm_url)
-        if response.status_code == 200:
-            data = response.json()
-            if data['code'] == 'Ok':
-                route = data['routes'][0]
-                geometry = route['geometry']
-                distance_meters = route['distance']
-                distance_miles = distance_meters * 0.000621371
-                result = (geometry, distance_miles)
-                cache.set(cache_key, result, 3600) # 1h
-                return result
+        try:
+            response = requests.get(osrm_url)
+            if response.status_code == 200:
+                data = response.json()
+                if data['code'] == 'Ok':
+                    route = data['routes'][0]
+                    geometry = route['geometry']
+                    distance_meters = route['distance']
+                    distance_miles = distance_meters * 0.000621371
+                    result = (geometry, distance_miles)
+                    cache.set(cache_key, result, 86400) # 24h as per infra refinement
+                    return result
+        except Exception as e:
+            logger.error(f"OSRM request failed: {e}")
         
         raise Exception("Failed to fetch route from OSRM.")
 
@@ -91,31 +119,23 @@ class FuelOptimizationService:
             return [points[0], points[-1]]
 
     @staticmethod
-    def find_stops_along_route(route_coords):
+    def find_stops_along_route(route_coords, corridor_width_miles=10):
         """Uses KD-Tree for efficient spatial search along the route."""
         # 1. Simplify route for spatial query efficiency
-        # epsilon ~ 0.01 deg is roughly 1km
         simplified_route = FuelOptimizationService.ramer_douglas_peucker(route_coords, 0.01)
         
-        # 2. Get all stops from DB (caching KD-Tree would be better if data is static)
-        stops_cache_key = "all_fuel_stops_kdtree"
-        cached_data = cache.get(stops_cache_key)
+        # 2. Get stops data from singleton
+        tree, stops_list = get_stops_data()
         
-        if cached_data:
-            tree, stops_list = cached_data
-        else:
-            stops_qs = FuelStop.objects.all().only('id', 'name', 'address', 'city', 'state', 'retail_price', 'latitude', 'longitude')
-            stops_list = list(stops_qs)
-            if not stops_list:
-                return []
-            coords = np.array([[s.longitude, s.latitude] for s in stops_list])
-            tree = KDTree(coords)
-            cache.set(stops_cache_key, (tree, stops_list), 3600)
+        if not tree:
+            return []
 
-        # 3. Find stops within ~3 miles (0.045 degrees approx) of any simplified route point
+        # 3. Find stops within corridor_width_miles of any simplified route point
+        # approx 0.015 degrees per mile
+        radius_deg = corridor_width_miles * 0.015
         relevant_indices = set()
         for pt in simplified_route:
-            indices = tree.query_ball_point(pt, 0.045)
+            indices = tree.query_ball_point(pt, radius_deg)
             relevant_indices.update(indices)
         
         return [stops_list[i] for i in relevant_indices]
@@ -130,51 +150,63 @@ class FuelOptimizationService:
         return R * c
 
     @staticmethod
-    def optimize_fuel_plan(route_coords, total_distance):
+    def optimize_fuel_plan(route_coords, total_distance, mpg=10, fuel_capacity=50, current_fuel=50, safety_reserve_pct=0.1, corridor_width_miles=10):
         """
         Implements Dynamic Programming to find the Global Minimum cost.
         Nodes: Start (0), End (N+1), and FuelStops along the route.
-        Edges: A -> B is valid if dist(A, B) <= 500 miles.
-        Cost(A, B) = (dist(A, B) / 10 MPG) * Price(B).
+        Edges: A -> B is valid if fuel needed <= usable capacity.
         """
-        mpg = 10
-        tank_capacity = 500
+        logger.info(f"Optimizing fuel plan for {total_distance:.2f} miles route.")
         
-        all_stops = FuelOptimizationService.find_stops_along_route(route_coords)
+        safety_reserve_amt = fuel_capacity * safety_reserve_pct
+        max_usable_fuel = fuel_capacity - safety_reserve_amt
+        max_range = max_usable_fuel * mpg
         
-        # Project stops onto route to get distances
-        # For Dijkstra/DP, we need stops ordered by distance from start
+        # Usable fuel currently in tank
+        initial_usable_fuel = max(0.0, current_fuel - safety_reserve_amt)
+        initial_max_range = initial_usable_fuel * mpg
+
+        all_stops = FuelOptimizationService.find_stops_along_route(route_coords, corridor_width_miles=corridor_width_miles)
+        logger.info(f"Found {len(all_stops)} potential stops in corridor.")
+        
+        # Precompute cumulative distances along route for more accurate projection
+        cum_dist = [0.0]
+        for i in range(1, len(route_coords)):
+            d = FuelOptimizationService.haversine(
+                route_coords[i-1][0], route_coords[i-1][1],
+                route_coords[i][0], route_coords[i][1]
+            )
+            cum_dist.append(cum_dist[-1] + d)
+        
+        # Project stops onto route
         stops_with_dist = []
         for stop in all_stops:
-            # Find closest point on route
-            # Using simple distance to closest route point
-            min_dist = float('inf')
+            min_dist_sq = float('inf')
             closest_idx = 0
             for i, pt in enumerate(route_coords):
-                d = (stop.longitude - pt[0])**2 + (stop.latitude - pt[1])**2
-                if d < min_dist:
-                    min_dist = d
+                d_sq = (stop.longitude - pt[0])**2 + (stop.latitude - pt[1])**2
+                if d_sq < min_dist_sq:
+                    min_dist_sq = d_sq
                     closest_idx = i
             
-            dist_along_route = (closest_idx / (len(route_coords)-1)) * total_distance
-            # Calculate detour cost: Stop is some distance off route
-            detour_dist = FuelOptimizationService.haversine(stop.longitude, stop.latitude, route_coords[closest_idx][0], route_coords[closest_idx][1])
+            dist_along_route = cum_dist[closest_idx]
+            detour_dist = FuelOptimizationService.haversine(
+                stop.longitude, stop.latitude, 
+                route_coords[closest_idx][0], route_coords[closest_idx][1]
+            )
             
             stops_with_dist.append({
                 'obj': stop,
                 'dist': dist_along_route,
-                'detour': detour_dist
+                'detour': detour_dist,
+                'price': float(stop.retail_price)
             })
         
         stops_with_dist.sort(key=lambda x: x['dist'])
 
-        # Nodes: 0 is start, 1..N are stops, N+1 is destination
-        nodes = [{'dist': 0, 'price': 0, 'detour': 0}] + stops_with_dist + [{'dist': total_distance, 'price': 0, 'detour': 0}]
+        # Nodes: 0=Start, 1..N=Stops, N+1=End
+        nodes = [{'dist': 0, 'price': 0, 'detour': 0}] + stops_with_dist + [{'dist': cum_dist[-1], 'price': 0, 'detour': 0}]
         n = len(nodes)
-        
-        # DP: min_cost[i] = minimum cost to reach node i with full tank
-        # Actually, simpler to think: min_cost[i] is min cost to reach i and refuel there.
-        # But we start with full tank, so cost to reach 0 is 0.
         
         inf = float('inf')
         min_cost = [inf] * n
@@ -183,42 +215,61 @@ class FuelOptimizationService:
         
         for i in range(1, n):
             for j in range(i):
-                # Distance from node j to node i
-                # If we are at node j (refueled), can we reach node i?
-                # Distance includes detour to j and detour to i if they are stops
-                d = nodes[i]['dist'] - nodes[j]['dist']
+                # Calculate distance from j to i considering detours
+                d_segment = nodes[i]['dist'] - nodes[j]['dist']
+                d_total = d_segment + nodes[j]['detour'] + nodes[i]['detour']
                 
-                # If d > 500, we can't reach i from j directly
-                if d > tank_capacity:
-                    continue
+                reachable = False
+                cost = 0.0
                 
-                # Cost to go from j to i and refuel at i
-                # Fuel consumed = d / 10
-                fuel_consumed = d / mpg
-                price = float(nodes[i]['obj'].retail_price) if i < n-1 else 0
-                trip_cost = fuel_consumed * price
+                if j == 0:
+                    # From start
+                    if d_total <= initial_max_range:
+                        reachable = True
+                        if i < n - 1: # Stopping at i
+                            fuel_at_i = current_fuel - (d_total / mpg)
+                            fuel_to_buy = fuel_capacity - fuel_at_i
+                            cost = fuel_to_buy * nodes[i]['price']
+                        else: # Going to end
+                            cost = 0.0
+                else:
+                    # From a previous stop j
+                    if d_total <= max_range:
+                        reachable = True
+                        if i < n - 1: # Stopping at i
+                            # Since we filled up at j, we buy what we consumed
+                            fuel_to_buy = d_total / mpg
+                            cost = fuel_to_buy * nodes[i]['price']
+                        else: # Going to end
+                            cost = 0.0
                 
-                if min_cost[j] + trip_cost < min_cost[i]:
-                    min_cost[i] = min_cost[j] + trip_cost
+                if reachable and min_cost[j] + cost < min_cost[i]:
+                    min_cost[i] = min_cost[j] + cost
                     parent[i] = j
 
         # Path reconstruction
         stops_to_make = []
-        curr = parent[n-1] # Last stop before destination
+        total_detour = 0.0
+        curr = parent[n-1]
         while curr > 0:
             node = nodes[curr]
             stop_obj = node['obj']
+            total_detour += node['detour'] * 2 # In and out
             stops_to_make.append({
                 "name": stop_obj.name,
                 "address": stop_obj.address,
                 "city": stop_obj.city,
                 "state": stop_obj.state,
-                "price": float(stop_obj.retail_price),
+                "price": node['price'],
                 "distance_along_route": node['dist'],
+                "detour_miles": node['detour'],
                 "latitude": stop_obj.latitude,
                 "longitude": stop_obj.longitude
             })
             curr = parent[curr]
         
         stops_to_make.reverse()
-        return stops_to_make, min_cost[n-1], "Global DP"
+        logger.info(f"Optimization complete. Total stops: {len(stops_to_make)}, Total cost: ${min_cost[n-1]:.2f}")
+        return stops_to_make, min_cost[n-1], total_detour, "Global DP"
+
+
