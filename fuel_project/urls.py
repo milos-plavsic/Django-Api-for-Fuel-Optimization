@@ -16,9 +16,10 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path
-from optimizer.views import RouteOptimizationView
+from optimizer.views import RouteOptimizationView, IndexView
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('', IndexView.as_view(), name='index'),
     path('api/route/', RouteOptimizationView.as_view(), name='route-optimization'),
 ]

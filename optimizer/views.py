@@ -1,7 +1,13 @@
+from django.shortcuts import render
+from django.views import View
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from .services import FuelOptimizationService
+
+class IndexView(View):
+    def get(self, request):
+        return render(request, 'index.html')
 
 class RouteOptimizationView(APIView):
     def get(self, request):
@@ -18,13 +24,14 @@ class RouteOptimizationView(APIView):
             geometry, total_distance = FuelOptimizationService.get_route(start, finish)
             route_coords = geometry['coordinates']
             
-            stops, total_cost = FuelOptimizationService.optimize_fuel_plan(route_coords, total_distance)
+            stops, total_cost, strategy = FuelOptimizationService.optimize_fuel_plan(route_coords, total_distance)
             
             return Response({
                 "route": geometry,
                 "total_distance_miles": total_distance,
                 "fuel_stops": stops,
-                "total_fuel_cost": total_cost
+                "total_fuel_cost": total_cost,
+                "strategy_used": strategy
             }, status=status.HTTP_200_OK)
             
         except ValueError as e:

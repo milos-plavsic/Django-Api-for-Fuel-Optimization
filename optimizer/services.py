@@ -214,7 +214,9 @@ class FuelOptimizationService:
                 "city": stop_obj.city,
                 "state": stop_obj.state,
                 "price": float(stop_obj.retail_price),
-                "distance_along_route": node['dist']
+                "distance_along_route": node['dist'],
+                "latitude": stop_obj.latitude,
+                "longitude": stop_obj.longitude
             })
             curr = parent[curr]
         
