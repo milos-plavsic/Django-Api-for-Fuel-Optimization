@@ -1,0 +1,119 @@
+{
+  "info": {
+    "name": "Fuel Route Optimization API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000"
+    }
+  ],
+  "item": [
+    {
+      "name": "Plan route using text and postal code",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": \"12345\",\n  \"finish\": \"Santa Barbara, CA\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{base_url}}/api/route/"
+      }
+    },
+    {
+      "name": "Plan route using coordinates",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": {\"latitude\": 40.7128, \"longitude\": -74.0060},\n  \"finish\": {\"latitude\": 34.0522, \"longitude\": -118.2437}\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{base_url}}/api/route/"
+      }
+    },
+    {
+      "name": "Plan route using up to two routes",
+      "request": {
+        "method": "POST",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": \"12345\",\n  \"finish\": \"Santa Barbara, CA\"\n}",
+          "options": {"raw": {"language": "json"}}
+        },
+        "url": "{{base_url}}/api/route-alternative/"
+      }
+    },
+    {
+      "name": "Plan route using up to three routes",
+      "request": {
+        "method": "POST",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": \"12345\",\n  \"finish\": \"Santa Barbara, CA\"\n}",
+          "options": {"raw": {"language": "json"}}
+        },
+        "url": "{{base_url}}/api/route-three/"
+      }
+    },
+    {
+      "name": "Demonstrate invalid input",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": \"not a real place\",\n  \"finish\": \"Santa Barbara, CA\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{base_url}}/api/route/"
+      }
+    },
+    {
+      "name": "Plan route using MILP optimal fuel-price plan",
+      "request": {
+        "method": "POST",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": \"12345\",\n  \"finish\": \"Santa Barbara, CA\"\n}",
+          "options": {"raw": {"language": "json"}}
+        },
+        "url": "{{base_url}}/api/route-milp/"
+      }
+    }
+  ]
+}

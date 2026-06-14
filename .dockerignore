@@ -1,0 +1,13 @@
+.git
+.env
+.venv
+__pycache__
+*.pyc
+*.sqlite3
+.pytest_cache
+data/osrm
+data/overpass
+server.pid
+server.stdout.log
+server.stderr.log
+django_cache

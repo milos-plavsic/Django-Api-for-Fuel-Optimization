@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fuel Route Planner</title>
+  <link rel="preconnect" href="https://unpkg.com">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07111f;
+      --panel: #0e1b2c;
+      --panel-2: #13253a;
+      --line: #25415f;
+      --text: #f3f7fb;
+      --muted: #9eb2c8;
+      --accent: #34d399;
+      --danger: #fb7185;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(circle at top left, #15314a 0, var(--bg) 45%);
+      color: var(--text);
+      font: 15px/1.45 system-ui, sans-serif;
+    }
+    .layout {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: minmax(290px, 380px) 1fr;
+    }
+    aside {
+      padding: 24px;
+      background: color-mix(in srgb, var(--panel) 94%, transparent);
+      border-right: 1px solid var(--line);
+      overflow-y: auto;
+    }
+    h1 { margin: 0 0 6px; font-size: 25px; }
+    h2 { margin: 24px 0 10px; font-size: 16px; }
+    p { color: var(--muted); margin: 0 0 18px; }
+    label { display: block; margin: 14px 0 6px; color: var(--muted); font-weight: 650; }
+    input, select, button {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 11px 12px;
+      background: var(--panel-2);
+      color: var(--text);
+      font: inherit;
+    }
+    button {
+      margin-top: 18px;
+      background: var(--accent);
+      color: #032016;
+      border: 0;
+      font-weight: 800;
+      cursor: pointer;
+    }
+    button:disabled { opacity: .6; cursor: wait; }
+    .coordinates { display: none; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .coordinates.visible { display: grid; }
+    .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .card, .stop {
+      padding: 11px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-2);
+    }
+    .card span { display: block; color: var(--muted); font-size: 12px; }
+    .card strong { font-size: 18px; }
+    .stop { margin-top: 8px; }
+    .stop small { display: block; color: var(--muted); }
+    .error { margin-top: 14px; color: var(--danger); white-space: pre-wrap; }
+    #map { min-height: 100vh; background: #dbeafe; }
+    .hint { font-size: 12px; }
+    @media (max-width: 800px) {
+      .layout { display: block; }
+      #map { min-height: 60vh; }
+    }
+  </style>
+</head>
+<body>
+  <main class="layout">
+    <aside>
+      <h1>Fuel Route Planner</h1>
+      <p>Find a route and cost-effective fuel stops with one routing request.</p>
+
+      <form id="route-form">
+        <label for="input-mode">Input type</label>
+        <select id="input-mode">
+          <option value="text">Text or postal code</option>
+          <option value="coordinates">Coordinates</option>
+        </select>
+
+        <label for="solution-mode">Solution</label>
+        <select id="solution-mode">
+          <option value="/api/route/">Primary route, lowest latency</option>
+          <option value="/api/route-alternative/">Up to two routes</option>
+          <option value="/api/route-three/">Up to three routes</option>
+          <option value="/api/route-milp/">MILP optimal fuel-price plan</option>
+        </select>
+
+        <div id="text-fields">
+          <label for="start-text">Start</label>
+          <input id="start-text" value="Alamosa, CO" required>
+          <label for="finish-text">Finish</label>
+          <input id="finish-text" value="Atwood, CO" required>
+        </div>
+
+        <div id="coordinate-fields">
+          <label>Start coordinates</label>
+          <div class="coordinates">
+            <input id="start-lat" type="number" step="any" value="32.7767" placeholder="Latitude">
+            <input id="start-lon" type="number" step="any" value="-96.7970" placeholder="Longitude">
+          </div>
+          <label>Finish coordinates</label>
+          <div class="coordinates">
+            <input id="finish-lat" type="number" step="any" value="29.7604" placeholder="Latitude">
+            <input id="finish-lon" type="number" step="any" value="-95.3698" placeholder="Longitude">
+          </div>
+        </div>
+
+        <button id="submit-button" type="submit">Plan route</button>
+        <div id="error" class="error" role="alert"></div>
+      </form>
+
+      <section id="results" hidden>
+        <h2>Trip summary</h2>
+        <div class="cards">
+          <div class="card"><span>Distance</span><strong id="distance"></strong></div>
+          <div class="card"><span>Fuel cost</span><strong id="cost"></strong></div>
+          <div class="card"><span>Fuel consumed</span><strong id="fuel"></strong></div>
+          <div class="card"><span>Fueling stops</span><strong id="stop-count"></strong></div>
+          <div class="card"><span>Routing calls</span><strong id="calls"></strong></div>
+          <div class="card"><span>Routes evaluated</span><strong id="routes-evaluated"></strong></div>
+          <div class="card"><span>Optimality</span><strong id="optimality"></strong></div>
+        </div>
+        <h2>Fuel stops</h2>
+        <p id="no-stops" class="hint"></p>
+        <div id="stops"></div>
+      </section>
+    </aside>
+    <div id="map" aria-label="Route map"></div>
+  </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const map = L.map("map").setView([39.5, -98.35], 4);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: "&copy; OpenStreetMap contributors"
+    }).addTo(map);
+
+    const layers = L.layerGroup().addTo(map);
+    const mode = document.querySelector("#input-mode");
+    const coordinateGroups = document.querySelectorAll(".coordinates");
+    const textFields = document.querySelector("#text-fields");
+    const coordinateFields = document.querySelector("#coordinate-fields");
+    const form = document.querySelector("#route-form");
+    const button = document.querySelector("#submit-button");
+    const error = document.querySelector("#error");
+
+    function setMode() {
+      const coordinates = mode.value === "coordinates";
+      textFields.hidden = coordinates;
+      coordinateFields.hidden = !coordinates;
+      coordinateGroups.forEach(group => group.classList.toggle("visible", coordinates));
+    }
+
+    function value(id) {
+      return document.querySelector(id).value.trim();
+    }
+
+    function requestBody() {
+      if (mode.value === "coordinates") {
+        return {
+          start: {latitude: Number(value("#start-lat")), longitude: Number(value("#start-lon"))},
+          finish: {latitude: Number(value("#finish-lat")), longitude: Number(value("#finish-lon"))}
+        };
+      }
+      return {start: value("#start-text"), finish: value("#finish-text")};
+    }
+
+    function displayError(payload) {
+      if (Array.isArray(payload)) return payload.join("\n");
+      if (payload.reason === "insufficient_fuel_price_coverage") {
+        return `${payload.detail}
+
+Route distance: ${payload.distance_miles} miles
+Priced stations near route: ${payload.priced_stations_near_route}
+Uncovered gap: ${payload.uncovered_gap_miles} miles
+Vehicle maximum range: ${payload.maximum_range_miles} miles`;
+      }
+      if (payload.detail) return payload.detail;
+      return JSON.stringify(payload);
+    }
+
+    function render(data) {
+      layers.clearLayers();
+      const latLngs = data.route.coordinates.map(point => [point[1], point[0]]);
+      const route = L.polyline(latLngs, {color: "#0f766e", weight: 5}).addTo(layers);
+      L.marker([data.start.coordinates[1], data.start.coordinates[0]])
+        .bindPopup(`<strong>Start</strong><br>${data.start.display_name}`)
+        .addTo(layers);
+      L.marker([data.finish.coordinates[1], data.finish.coordinates[0]])
+        .bindPopup(`<strong>Finish</strong><br>${data.finish.display_name}`)
+        .addTo(layers);
+
+      const stops = document.querySelector("#stops");
+      stops.replaceChildren();
+      data.fuel_stops.forEach(stop => {
+        L.marker([stop.latitude, stop.longitude])
+          .bindPopup(`<strong>${stop.name}</strong><br>$${stop.price_per_gallon.toFixed(3)}/gal<br>${stop.gallons_purchased} gallons`)
+          .addTo(layers);
+        const element = document.createElement("div");
+        element.className = "stop";
+        element.innerHTML = `<strong>${stop.name}</strong>
+          <small>${stop.city}, ${stop.state} at route mile ${stop.route_mile.toFixed(1)}</small>
+          <small>${stop.gallons_purchased} gal at $${stop.price_per_gallon.toFixed(3)} = $${stop.purchase_cost.toFixed(2)}</small>`;
+        if (stop.location_source === "city_centroid") {
+          element.innerHTML += `<small>Approximate city-level location</small>`;
+        } else if (stop.location_source === "osm_highway_near_city") {
+          element.innerHTML += `<small>Approximate highway location near city</small>`;
+        }
+        stops.appendChild(element);
+      });
+
+      document.querySelector("#distance").textContent = `${data.distance_miles.toFixed(2)} mi`;
+      document.querySelector("#cost").textContent = `$${data.total_fuel_cost.toFixed(2)}`;
+      document.querySelector("#fuel").textContent = `${data.trip_fuel_consumed_gallons.toFixed(2)} gal`;
+      document.querySelector("#stop-count").textContent = data.fuel_stops.length;
+      document.querySelector("#calls").textContent = data.routing_api_calls;
+      document.querySelector("#routes-evaluated").textContent = data.routes_evaluated;
+      document.querySelector("#optimality").textContent = data.optimization_optimality_proven
+        ? "Proven"
+        : "Cost-effective";
+      document.querySelector("#no-stops").textContent = data.fuel_stops.length
+        ? ""
+        : "No fuel stop is required with the assumed full 50-gallon starting tank.";
+      document.querySelector("#results").hidden = false;
+      map.fitBounds(route.getBounds(), {padding: [30, 30]});
+    }
+
+    mode.addEventListener("change", setMode);
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+      button.disabled = true;
+      button.textContent = "Planning...";
+      error.textContent = "";
+      try {
+        const response = await fetch(document.querySelector("#solution-mode").value, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(requestBody())
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(displayError(data));
+        render(data);
+      } catch (exception) {
+        error.textContent = exception.message;
+      } finally {
+        button.disabled = false;
+        button.textContent = "Plan route";
+      }
+    });
+    setMode();
+  </script>
+</body>
+</html>
