@@ -18,6 +18,10 @@ class UiTests(TestCase):
         self.assertContains(response, "/api/route-alternative/")
         self.assertContains(response, "/api/route-three/")
         self.assertContains(response, "/api/route-milp/")
+        self.assertContains(response, 'id="optimization-method"')
+        self.assertContains(response, 'id="route-count"')
+        self.assertContains(response, 'id="request-json"')
+        self.assertContains(response, 'id="response-json"')
         self.assertNotContains(response, 'id="plan-cache"')
 
 
@@ -72,6 +76,7 @@ class RouteApiTests(TestCase):
         self.assertEqual(response.data["routing_api_calls"], 1)
         self.assertEqual(response.data["solution"], "primary")
         self.assertEqual(response.data["routes_evaluated"], 1)
+        self.assertEqual(response.data["routes_requested"], 1)
         self.assertEqual(response.data["optimization_method"], "fuel_price_greedy")
         self.assertNotIn("plan_cache_hit", response.data)
         self.assertEqual(request_get.call_count, 1)
@@ -131,6 +136,41 @@ class RouteApiTests(TestCase):
             )
         self.assertEqual(response.status_code, 400)
         request_get.assert_not_called()
+
+    def test_route_count_must_be_between_one_and_five(self):
+        response = self.client.post(
+            "/api/route/",
+            {"start": "New York, NY", "finish": "19103", "route_count": 6},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    @patch("routing.services.osrm.requests.get")
+    def test_requested_route_count_is_sent_and_all_returned_routes_are_evaluated(
+        self,
+        request_get,
+    ):
+        route = {
+            "distance": 160934.4,
+            "duration": 7200,
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [[-74.0060, 40.7128], [-75.1652, 39.9526]],
+            },
+        }
+        request_get.return_value = Mock(
+            json=lambda: {"code": "Ok", "routes": [route, route]},
+            raise_for_status=lambda: None,
+        )
+        response = self.client.post(
+            "/api/route-milp/",
+            {"start": "New York, NY", "finish": "19103", "route_count": 5},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["routes_requested"], 5)
+        self.assertEqual(response.data["routes_evaluated"], 2)
+        self.assertEqual(request_get.call_args.kwargs["params"]["alternatives"], "true")
 
 
     def test_coordinates_outside_us_are_declined(self):

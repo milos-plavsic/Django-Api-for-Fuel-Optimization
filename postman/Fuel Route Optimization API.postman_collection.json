@@ -22,7 +22,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"start\": \"12345\",\n  \"finish\": \"Santa Barbara, CA\"\n}",
+          "raw": "{\n  \"start\": \"12345\",\n  \"finish\": \"Santa Barbara, CA\",\n  \"route_count\": 1\n}",
           "options": {
             "raw": {
               "language": "json"
@@ -44,7 +44,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"start\": {\"latitude\": 40.7128, \"longitude\": -74.0060},\n  \"finish\": {\"latitude\": 34.0522, \"longitude\": -118.2437}\n}",
+          "raw": "{\n  \"start\": {\"latitude\": 40.7128, \"longitude\": -74.0060},\n  \"finish\": {\"latitude\": 34.0522, \"longitude\": -118.2437},\n  \"route_count\": 1\n}",
           "options": {
             "raw": {
               "language": "json"
@@ -61,7 +61,7 @@
         "header": [{"key": "Content-Type", "value": "application/json"}],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"start\": \"12345\",\n  \"finish\": \"Santa Barbara, CA\"\n}",
+          "raw": "{\n  \"start\": \"12345\",\n  \"finish\": \"Santa Barbara, CA\",\n  \"route_count\": 2\n}",
           "options": {"raw": {"language": "json"}}
         },
         "url": "{{base_url}}/api/route-alternative/"
@@ -74,7 +74,7 @@
         "header": [{"key": "Content-Type", "value": "application/json"}],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"start\": \"12345\",\n  \"finish\": \"Santa Barbara, CA\"\n}",
+          "raw": "{\n  \"start\": \"12345\",\n  \"finish\": \"Santa Barbara, CA\",\n  \"route_count\": 5\n}",
           "options": {"raw": {"language": "json"}}
         },
         "url": "{{base_url}}/api/route-three/"
@@ -109,7 +109,7 @@
         "header": [{"key": "Content-Type", "value": "application/json"}],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"start\": \"12345\",\n  \"finish\": \"Santa Barbara, CA\"\n}",
+          "raw": "{\n  \"start\": \"12345\",\n  \"finish\": \"Santa Barbara, CA\",\n  \"route_count\": 5\n}",
           "options": {"raw": {"language": "json"}}
         },
         "url": "{{base_url}}/api/route-milp/"

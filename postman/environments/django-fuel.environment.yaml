@@ -1,0 +1,6 @@
+name: django-fuel
+values:
+  - key: start
+    value: '87654'
+  - key: finish
+    value: homestead

@@ -74,6 +74,29 @@
     .error { margin-top: 14px; color: var(--danger); white-space: pre-wrap; }
     #map { min-height: 100vh; background: #dbeafe; }
     .hint { font-size: 12px; }
+    .api-console {
+      margin-top: 20px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+    }
+    .api-console pre {
+      max-height: 320px;
+      overflow: auto;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #07111f;
+      color: #cfe5fa;
+      font: 12px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .request-meta {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
     @media (max-width: 800px) {
       .layout { display: block; }
       #map { min-height: 60vh; }
@@ -93,12 +116,19 @@
           <option value="coordinates">Coordinates</option>
         </select>
 
-        <label for="solution-mode">Solution</label>
-        <select id="solution-mode">
-          <option value="/api/route/">Primary route, lowest latency</option>
-          <option value="/api/route-alternative/">Up to two routes</option>
-          <option value="/api/route-three/">Up to three routes</option>
-          <option value="/api/route-milp/">MILP optimal fuel-price plan</option>
+        <label for="optimization-method">Optimization method</label>
+        <select id="optimization-method">
+          <option value="greedy">Fast fuel-price greedy</option>
+          <option value="milp">MILP optimal fuel-price plan</option>
+        </select>
+
+        <label for="route-count">Routes to evaluate</label>
+        <select id="route-count">
+          <option value="1">1 route</option>
+          <option value="2">Up to 2 routes</option>
+          <option value="3">Up to 3 routes</option>
+          <option value="4">Up to 4 routes</option>
+          <option value="5">Up to 5 routes</option>
         </select>
 
         <div id="text-fields">
@@ -140,6 +170,18 @@
         <p id="no-stops" class="hint"></p>
         <div id="stops"></div>
       </section>
+
+      <section class="api-console">
+        <h2>API request tester</h2>
+        <div class="request-meta">
+          <div class="card"><span>Endpoint</span><strong id="api-endpoint">/api/route/</strong></div>
+          <div class="card"><span>Status / time</span><strong id="api-status">Not sent</strong></div>
+        </div>
+        <p class="hint">Request JSON</p>
+        <pre id="request-json">{}</pre>
+        <p class="hint">Response JSON</p>
+        <pre id="response-json">No response yet.</pre>
+      </section>
     </aside>
     <div id="map" aria-label="Route map"></div>
   </main>
@@ -160,6 +202,8 @@
     const form = document.querySelector("#route-form");
     const button = document.querySelector("#submit-button");
     const error = document.querySelector("#error");
+    const optimizationMethod = document.querySelector("#optimization-method");
+    const routeCount = document.querySelector("#route-count");
 
     function setMode() {
       const coordinates = mode.value === "coordinates";
@@ -176,10 +220,28 @@
       if (mode.value === "coordinates") {
         return {
           start: {latitude: Number(value("#start-lat")), longitude: Number(value("#start-lon"))},
-          finish: {latitude: Number(value("#finish-lat")), longitude: Number(value("#finish-lon"))}
+          finish: {latitude: Number(value("#finish-lat")), longitude: Number(value("#finish-lon"))},
+          route_count: Number(routeCount.value)
         };
       }
-      return {start: value("#start-text"), finish: value("#finish-text")};
+      return {
+        start: value("#start-text"),
+        finish: value("#finish-text"),
+        route_count: Number(routeCount.value)
+      };
+    }
+
+    function endpoint() {
+      if (optimizationMethod.value === "milp") return "/api/route-milp/";
+      if (routeCount.value === "2") return "/api/route-alternative/";
+      if (routeCount.value === "3") return "/api/route-three/";
+      return "/api/route/";
+    }
+
+    function updateRequestPreview() {
+      document.querySelector("#api-endpoint").textContent = endpoint();
+      document.querySelector("#request-json").textContent =
+        JSON.stringify(requestBody(), null, 2);
     }
 
     function displayError(payload) {
@@ -243,28 +305,43 @@ Vehicle maximum range: ${payload.maximum_range_miles} miles`;
     }
 
     mode.addEventListener("change", setMode);
+    optimizationMethod.addEventListener("change", updateRequestPreview);
+    routeCount.addEventListener("change", updateRequestPreview);
+    form.addEventListener("input", updateRequestPreview);
     form.addEventListener("submit", async event => {
       event.preventDefault();
       button.disabled = true;
       button.textContent = "Planning...";
       error.textContent = "";
+      const request = requestBody();
+      const started = performance.now();
+      document.querySelector("#response-json").textContent = "Waiting for response...";
       try {
-        const response = await fetch(document.querySelector("#solution-mode").value, {
+        const response = await fetch(endpoint(), {
           method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify(requestBody())
+          body: JSON.stringify(request)
         });
         const data = await response.json();
+        const elapsed = performance.now() - started;
+        document.querySelector("#api-status").textContent =
+          `${response.status} ${response.statusText} / ${elapsed.toFixed(0)} ms`;
+        document.querySelector("#response-json").textContent = JSON.stringify(data, null, 2);
         if (!response.ok) throw new Error(displayError(data));
         render(data);
       } catch (exception) {
         error.textContent = exception.message;
+        if (document.querySelector("#response-json").textContent === "Waiting for response...") {
+          document.querySelector("#api-status").textContent = "Request failed";
+          document.querySelector("#response-json").textContent = exception.message;
+        }
       } finally {
         button.disabled = false;
         button.textContent = "Plan route";
       }
     });
     setMode();
+    updateRequestPreview();
   </script>
 </body>
 </html>

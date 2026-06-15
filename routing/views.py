@@ -6,7 +6,6 @@ from rest_framework.views import APIView
 
 from .serializers import RouteRequestSerializer
 from .services.geo import simplify_route
-from .services.milp_optimizer import optimize_fuel_stops_milp
 from .services.optimizer import NoFeasibleFuelPlan, optimize_fuel_stops
 from .services.osrm import RoutingProviderError, get_routes
 from .services.plan_cache import cache_plan, get_cached_plan, plan_cache_key
@@ -20,12 +19,10 @@ class IndexView(TemplateView):
 
 class RouteOptimizationView(APIView):
     solution_name = "primary"
-    max_routes = 2
-    include_tolls = False
-    stop_after_first_feasible = True
+    default_route_count = 1
 
-    def get_candidate_routes(self, start, finish):
-        return get_routes(start, finish, max_routes=self.max_routes)
+    def get_candidate_routes(self, start, finish, route_count):
+        return get_routes(start, finish, max_routes=route_count)
 
     def selection_cost(self, route, plan):
         return plan["total_fuel_cost"]
@@ -38,11 +35,16 @@ class RouteOptimizationView(APIView):
         serializer.is_valid(raise_exception=True)
         start = resolve_location(serializer.validated_data["start"])
         finish = resolve_location(serializer.validated_data["finish"])
+        route_count = serializer.validated_data.get(
+            "route_count",
+            self.default_route_count,
+        )
 
         completed_plan_key = plan_cache_key(
             start["coordinates"],
             finish["coordinates"],
             solution=self.solution_name,
+            route_count=route_count,
         )
         cached_result = get_cached_plan(completed_plan_key)
         if cached_result is not None:
@@ -54,6 +56,7 @@ class RouteOptimizationView(APIView):
             routes, external_calls = self.get_candidate_routes(
                 start["coordinates"],
                 finish["coordinates"],
+                route_count,
             )
             candidates = []
             last_plan_error = None
@@ -81,8 +84,6 @@ class RouteOptimizationView(APIView):
                         "selection_cost": self.selection_cost(candidate_route, plan),
                     }
                 )
-                if self.stop_after_first_feasible:
-                    break
             if not candidates:
                 raise last_plan_error or NoFeasibleFuelPlan(
                     "No priced station chain can cover any returned route."
@@ -128,6 +129,7 @@ class RouteOptimizationView(APIView):
             "duration_seconds": route["duration_seconds"],
             **plan,
             "routes_evaluated": routes_evaluated,
+            "routes_requested": route_count,
             "selected_route_index": selected["route_index"],
             "routing_api_calls": external_calls,
         }
@@ -137,18 +139,18 @@ class RouteOptimizationView(APIView):
 
 class AlternativeRouteOptimizationView(RouteOptimizationView):
     solution_name = "two_routes"
-    max_routes = 2
-    stop_after_first_feasible = False
+    default_route_count = 2
 
 
 class ThreeRouteOptimizationView(RouteOptimizationView):
     solution_name = "three_routes"
-    max_routes = 3
-    stop_after_first_feasible = False
+    default_route_count = 3
 
 
 class MilpRouteOptimizationView(RouteOptimizationView):
     solution_name = "milp_optimal"
 
     def optimize(self, stations, distance_miles):
+        from .services.milp_optimizer import optimize_fuel_stops_milp
+
         return optimize_fuel_stops_milp(stations, distance_miles)

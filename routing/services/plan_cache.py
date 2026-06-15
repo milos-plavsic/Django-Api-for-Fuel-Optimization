@@ -10,7 +10,7 @@ from routing.models import FuelStation
 from .optimizer import MPG, MAX_RANGE_MILES
 
 
-PLAN_ALGORITHM_VERSION = "fuel-price-fast-v2"
+PLAN_ALGORITHM_VERSION = "fuel-price-routes-v3"
 
 
 def fuel_data_revision():
@@ -19,12 +19,13 @@ def fuel_data_revision():
     return f"{revision['count']}:{latest}"
 
 
-def plan_cache_key(start_coordinates, finish_coordinates, solution="primary"):
+def plan_cache_key(start_coordinates, finish_coordinates, solution="primary", route_count=1):
     payload = {
         "start": [round(value, 5) for value in start_coordinates],
         "finish": [round(value, 5) for value in finish_coordinates],
         "algorithm": PLAN_ALGORITHM_VERSION,
         "solution": solution,
+        "route_count": route_count,
         "fuel_revision": fuel_data_revision(),
         "corridor": settings.STATION_CORRIDOR_MILES,
         "range": MAX_RANGE_MILES,

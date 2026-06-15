@@ -23,7 +23,7 @@ def get_routes(start, finish, max_routes=1):
                 "overview": "full",
                 "geometries": "geojson",
                 "steps": "false",
-                "alternatives": "false" if max_routes == 1 else str(max_routes),
+                "alternatives": "false" if max_routes == 1 else "true",
             },
             timeout=settings.OSRM_TIMEOUT_SECONDS,
         )
