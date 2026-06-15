@@ -12,3 +12,5 @@ django_cache/
 server.pid
 server.stdout.log
 server.stderr.log
+myrepo.bundle
+*.bundle
